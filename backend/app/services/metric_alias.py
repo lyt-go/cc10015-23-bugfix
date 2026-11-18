@@ -1,8 +1,11 @@
 """口径注册业务规则：状态流转、字段校验与筛选口径都收在这里。"""
 from __future__ import annotations
 
+import copy
+from datetime import date, datetime
 from typing import Any
 
+from app.services.metric_alias_resolution import MetricAliasResolutionService
 from app.store import store
 
 MODULE = "metric_alias"
@@ -11,6 +14,8 @@ REQUIRED_FIELDS = ["版本编号", "指标编号", "变更说明"]
 STATUS_ORDER = ["草稿", "待审批", "已生效", "已回滚"]
 ACTION_RULES = {"提交审批": "待审批", "确认生效": "已生效", "执行回滚": "已回滚"}
 NEGATIVE_ACTIONS = []
+
+resolver = MetricAliasResolutionService()
 
 
 class MetricAliasService:
@@ -59,7 +64,22 @@ class MetricAliasService:
         target = ACTION_RULES[action]
         if target not in STATUS_ORDER:
             return None, f"目标状态「{target}」不在允许的状态序列里"
-        entry["status"] = target
-        entry["pending"] = target != STATUS_ORDER[-1]
-        entry["abnormal"] = action in NEGATIVE_ACTIONS
+        # 状态、时间戳与口径解析记录在同一事务里落库，任何一步残留都整体回滚
+        snapshot = copy.deepcopy(entry)
+        try:
+            entry["status"] = target
+            entry["pending"] = target != STATUS_ORDER[-1]
+            entry["abnormal"] = action in NEGATIVE_ACTIONS
+            if action == "确认生效":
+                entry["确认时间"] = datetime.now().isoformat(timespec="seconds")
+            if action == "执行回滚":
+                entry["回滚时间"] = date.today().isoformat()
+            metric_code = str(entry.get("指标编号") or "").strip()
+            if metric_code and target in ("已生效", "已回滚"):
+                # 生效时间与解析记录同步落库，刷新后不会读到上一版本缓存
+                resolver.resolve_metric(metric_code)
+        except Exception:
+            entry.clear()
+            entry.update(snapshot)
+            return None, f"口径版本{action}失败，解析事务已回滚"
         return entry, f"口径版本已{action}"

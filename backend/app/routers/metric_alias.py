@@ -9,10 +9,12 @@ from fastapi.responses import StreamingResponse
 
 from app.schemas import ActionPayload, ActionResult, EntryPayload, PageResult
 from app.services.metric_alias import MetricAliasService
+from app.services.metric_alias_resolution import MetricAliasResolutionService
 
 router = APIRouter(prefix="/api/metric_alias", tags=["口径注册"])
 
 service = MetricAliasService()
+resolution_service = MetricAliasResolutionService()
 
 LIST_FIELDS = ["版本编号", "指标编号", "变更说明", "旧口径", "新口径", "生效时间", "审批状态", "变更人"]
 STATUSES = ["草稿", "待审批", "已生效", "已回滚"]
@@ -63,6 +65,22 @@ def export_entries(
     return StreamingResponse(
         iter([output.getvalue()]), media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": 'attachment; filename="metric_alias.csv"'})
+
+
+@router.get("/resolutions", response_model=PageResult[dict])
+def list_resolutions() -> PageResult[dict]:
+    """全量口径解析记录：按当前时间重算后交给消费端；必须声明在 /{entry_id} 之前。"""
+    records = resolution_service.list_resolutions()
+    return PageResult(items=records, total=len(records), page=1, size=max(len(records), 1))
+
+
+@router.get("/resolutions/{metric_code}", response_model=dict)
+def get_resolution(metric_code: str) -> dict:
+    """单指标口径解析记录：读前按当前时间重算，跨过生效时间会切换到新记录。"""
+    record = resolution_service.get_resolution(metric_code)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"指标 {metric_code} 暂无口径解析记录")
+    return record
 
 
 @router.get("/{entry_id}", response_model=dict)
